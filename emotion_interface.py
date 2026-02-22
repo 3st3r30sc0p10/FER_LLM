@@ -4,9 +4,11 @@ Continuous loop: Webcam → Emotion → Buffer → Grammar/Functions → LLM →
 """
 
 import argparse
+import sys
 import time
 import cv2
 from collections import deque
+from typing import Optional
 
 from webcam_capture import open_camera, read_frame, release_camera
 from emotion_mapper import (
@@ -15,36 +17,53 @@ from emotion_mapper import (
     build_prompt_from_grammar,
     emotion_to_grammar_sequence,
 )
-from llm_generator import generate
+from llm_generator import generate, get_dukegpt_url
 
 
 # Default buffer size for emotional flow over time
 DEFAULT_BUFFER_SIZE = 5
 
 
-def analyze_emotion(frame) -> str:
-    """Run DeepFace emotion analysis on a single frame. Returns dominant emotion."""
+def analyze_emotion(frame, detector_backend: str = "opencv"):
+    """
+    Run DeepFace emotion analysis on a single frame. Returns dominant emotion.
+    Expects BGR frame (OpenCV); converts to RGB for DeepFace.
+    Default detector is opencv (works without MediaPipe; use --detector mediapipe if you have mediapipe<0.10.31).
+    """
     from deepface import DeepFace
 
-    result = DeepFace.analyze(frame, actions=["emotion"], enforce_detection=False)
+    # OpenCV captures BGR; DeepFace models typically expect RGB
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    result = DeepFace.analyze(
+        frame_rgb,
+        actions=["emotion"],
+        enforce_detection=False,
+        detector_backend=detector_backend,
+    )
     return result[0]["dominant_emotion"]
 
 
 def run_pipeline(
     buffer_size: int = DEFAULT_BUFFER_SIZE,
-    backend: str = "ollama",
+    backend: str = "dukegpt",
     use_grammar: bool = False,
     device_id: int = 0,
+    detector_backend: str = "opencv",
+    dukegpt_url: Optional[str] = None,
 ) -> None:
     """
     Run the full pipeline in a continuous loop.
     - buffer_size: number of recent emotions to form structure sequence
-    - backend: "ollama" or "openai"
+    - backend: "dukegpt" or "openai"
     - use_grammar: if True use POS mapping; if False use Jakobsonian functions
     """
+    if backend == "dukegpt":
+        url = get_dukegpt_url(dukegpt_url)
+        print("DukeGPT backend: connecting to", url, file=sys.stderr)
     cap = open_camera(device_id)
     emotion_buffer = deque(maxlen=buffer_size)
     current_text = "Looking for a face..."
+    last_emotion_error = None  # show user why detection might be failing
     last_emotion_time = 0
     emotion_interval = 0.5  # seconds between emotion analyses (avoid overload)
     last_llm_time = 0
@@ -62,11 +81,13 @@ def run_pipeline(
             if now - last_emotion_time >= emotion_interval:
                 last_emotion_time = now
                 try:
-                    emotion = analyze_emotion(frame)
+                    emotion = analyze_emotion(frame, detector_backend=detector_backend)
                     emotion_buffer.append(emotion)
+                    last_emotion_error = None
                 except Exception as e:
-                    # Keep previous text on failure
-                    pass
+                    last_emotion_error = str(e)
+                    print("Emotion detection error:", e, file=sys.stderr)
+                    # Still allow pipeline to run with previous buffer if any
 
             # Build structure and call LLM at longer interval
             if emotion_buffer and (now - last_llm_time >= llm_interval):
@@ -78,7 +99,10 @@ def run_pipeline(
                     else:
                         functions = emotion_to_function_sequence(list(emotion_buffer))
                         prompt = build_prompt_from_functions(functions)
-                    current_text = generate(prompt, backend=backend)
+                    gen_kwargs = {"backend": backend}
+                    if backend == "dukegpt" and dukegpt_url is not None:
+                        gen_kwargs["dukegpt_url"] = dukegpt_url
+                    current_text = generate(prompt, **gen_kwargs)
                 except Exception as e:
                     current_text = f"(generation error: {e})"
 
@@ -117,11 +141,23 @@ def run_pipeline(
                     )
                 cv2.putText(display_frame, line, (50, y), font, font_scale, color, thickness)
 
-            # Show emotion buffer
+            # Show emotion buffer or status
             if emotion_buffer:
                 buf_str = " → ".join(emotion_buffer)
                 cv2.putText(
                     display_frame, buf_str, (50, display_frame.shape[0] - 30),
+                    font, 0.5, (200, 200, 200), 1
+                )
+            elif last_emotion_error:
+                # Short error hint so user knows why no face is detected
+                err_short = (last_emotion_error[:60] + "..") if len(last_emotion_error) > 60 else last_emotion_error
+                cv2.putText(
+                    display_frame, err_short, (50, display_frame.shape[0] - 30),
+                    font, 0.45, (0, 180, 255), 1
+                )
+            else:
+                cv2.putText(
+                    display_frame, "Position your face in frame", (50, display_frame.shape[0] - 30),
                     font, 0.5, (200, 200, 200), 1
                 )
 
@@ -145,9 +181,9 @@ def main():
     )
     parser.add_argument(
         "--backend",
-        choices=["ollama", "openai"],
-        default="ollama",
-        help="LLM backend (default: ollama)",
+        choices=["dukegpt", "openai"],
+        default="dukegpt",
+        help="LLM backend: dukegpt (default) or openai",
     )
     parser.add_argument(
         "--grammar",
@@ -160,12 +196,27 @@ def main():
         default=0,
         help="Camera device ID (default: 0)",
     )
+    parser.add_argument(
+        "--detector",
+        choices=["opencv", "mediapipe", "ssd", "retinaface", "mtcnn"],
+        default="opencv",
+        help="Face detector backend (default: opencv; mediapipe needs mediapipe<0.10.31)",
+    )
+    parser.add_argument(
+        "--dukegpt-url",
+        type=str,
+        default=None,
+        metavar="URL",
+        help="DukeGPT proxy base URL (e.g. http://localhost:3001 or http://server:3001). Default from DUKEGPT_API_URL.",
+    )
     args = parser.parse_args()
     run_pipeline(
         buffer_size=args.buffer_size,
         backend=args.backend,
         use_grammar=args.grammar,
         device_id=args.camera,
+        detector_backend=args.detector,
+        dukegpt_url=args.dukegpt_url,
     )
 
 

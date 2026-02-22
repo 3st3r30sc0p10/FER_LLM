@@ -1,9 +1,13 @@
 # Emotion-Driven Generative Language Interface
 # Core
 opencv-python>=4.8.0
-mediapipe>=0.10.0
+# Optional: for --detector mediapipe (must be <0.10.31; newer MediaPipe removed .solutions)
+# pip install "mediapipe>=0.10.0,<0.10.31"  # uncomment or install manually if needed
 deepface>=0.0.79
 requests>=2.31.0
+
+# TensorFlow 2.16+ uses Keras 3; DeepFace needs legacy Keras 2 API
+tf-keras>=2.16.0
 
 # LLM: use one or both
 openai>=1.0.0
