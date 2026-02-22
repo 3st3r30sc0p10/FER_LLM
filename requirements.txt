@@ -1,0 +1,12 @@
+# Emotion-Driven Generative Language Interface
+# Core
+opencv-python>=4.8.0
+mediapipe>=0.10.0
+deepface>=0.0.79
+requests>=2.31.0
+
+# LLM: use one or both
+openai>=1.0.0
+
+# Optional: for Flask web UI later
+# flask>=3.0.0
